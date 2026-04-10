@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>彦军生日快乐</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #060610; }
+  #wrap { position: relative; width: 100vw; height: 100vh; }
+  #videoEl {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover; opacity: 0.10;
+    transform: scaleX(-1); pointer-events: none;
+  }
+  #cakeCanvas  { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #textCanvas  { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #handCanvas  { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #hint {
+    position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.28); font-size: 12px; letter-spacing: 0.2em;
+    font-family: 'PingFang SC', 'Helvetica Neue', sans-serif;
+    white-space: nowrap; pointer-events: none;
+  }
+  #loading {
+    position: absolute; inset: 0; background: #060610;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100;
+  }
+  #loading p {
+    color: rgba(255,255,255,0.35);
+    font-family: 'PingFang SC','Helvetica Neue',sans-serif;
+    font-size: 12px; letter-spacing: 0.22em; margin-top: 18px;
+  }
+  .sp {
+    width: 30px; height: 30px;
+    border: 1.5px solid rgba(255,255,255,0.08);
+    border-top-color: rgba(255,200,120,0.7);
+    border-radius: 50%; animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="videoEl" playsinline autoplay muted></video>
+  <canvas id="cakeCanvas"></canvas>
+  <canvas id="textCanvas"></canvas>
+  <canvas id="handCanvas"></canvas>
+  <div id="hint">✋ 张开手掌 · 送上祝福</div>
+  <div id="loading"><div class="sp"></div><p>加载手势模型...</p></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script>
+// ═══════════════════════════════════════════
+//  SETUP
+// ═══════════════════════════════════════════
+const video      = document.getElementById('videoEl');
+const cakeCanvas = document.getElementById('cakeCanvas');
+const textCanvas = document.getElementById('textCanvas');
+const handCanvas = document.getElementById('handCanvas');
+const hint       = document.getElementById('hint');
+const loadingEl  = document.getElementById('loading');
+
+let W = window.innerWidth, H = window.innerHeight;
+function resize() {
+  W = cakeCanvas.width = textCanvas.width = handCanvas.width = window.innerWidth;
+  H = cakeCanvas.height = textCanvas.height = handCanvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const cCtx = cakeCanvas.getContext('2d');
+const tCtx = textCanvas.getContext('2d');
+const hCtx = handCanvas.getContext('2d');
+
+// ═══════════════════════════════════════════
+//  MATTER.JS PHYSICS
+// ═══════════════════════════════════════════
+const { Engine, Bodies, Body, World, Composite, Mouse, MouseConstraint, Events } = Matter;
+const engine = Engine.create({ gravity: { y: 1.3 } });
+const world  = engine.world;
+
+const CX = () => W / 2;
+const FLOOR = () => H - 55;
+
+// 蛋糕三层定义（相对 FLOOR）
+const LAYERS = () => {
+  const fl = FLOOR();
+  return [
+    { y: fl - 55,  hw: Math.min(210, W * 0.22), h: 110, color: '#e8a4c8' },
+    { y: fl - 170, hw: Math.min(155, W * 0.16), h: 110, color: '#c4a4e8' },
+    { y: fl - 275, hw: Math.min(108, W * 0.11), h: 100, color: '#a4c0e8' },
+  ];
+};
+const CREAM_R = () => Math.min(108, W * 0.11);
+const CREAM_CY = () => FLOOR() - 275 - 50 - CREAM_R();
+
+let wallBodies = [];
+
+function buildWalls() {
+  wallBodies.forEach(b => World.remove(world, b));
+  wallBodies = [];
+  const cx = CX(), fl = FLOOR(), layers = LAYERS(), cr = CREAM_R(), ccy = CREAM_CY();
+  const wOpt = { isStatic: true, friction: 0.3, restitution: 0.25, collisionFilter: { mask: 0xFFFFFFFF } };
+  const add = (x, y, w, h, ang = 0) => {
+    const b = Bodies.rectangle(x, y, w, h, { ...wOpt, angle: ang });
+    wallBodies.push(b); World.add(world, b);
+  };
+
+  // 地板
+  add(cx, H + 25, W * 3, 50);
+
+  layers.forEach((l, i) => {
+    const top = l.y - l.h / 2, bot = l.y + l.h / 2;
+    add(cx - l.hw - 5, l.y, 10, l.h + 4);
+    add(cx + l.hw + 5, l.y, 10, l.h + 4);
+    if (i === 0) add(cx, bot + 5, l.hw * 2 + 20, 10);
+    if (i < layers.length - 1) {
+      const nw = layers[i + 1].hw;
+      add(cx - (l.hw + nw) / 2 - 5, top, l.hw - nw, 10);
+      add(cx + (l.hw + nw) / 2 + 5, top, l.hw - nw, 10);
+      add(cx, top + 5, nw * 2 + 10, 10);
+    }
+  });
+
+  // 奶油半圆
+  const topLayer = layers[layers.length - 1];
+  const topOpen = topLayer.y - topLayer.h / 2;
+  add(cx, topOpen + 5, topLayer.hw * 2 + 10, 10);
+  const N = 20;
+  for (let i = 0; i < N; i++) {
+    const a1 = Math.PI + (i / N) * Math.PI;
+    const a2 = Math.PI + ((i + 1) / N) * Math.PI;
+    const x1 = cx + cr * Math.cos(a1), y1 = ccy + cr * Math.sin(a1);
+    const x2 = cx + cr * Math.cos(a2), y2 = ccy + cr * Math.sin(a2);
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    add(mx, my, len + 2, 10, Math.atan2(y2 - y1, x2 - x1));
+  }
+}
+buildWalls();
+
+// 鼠标拖拽
+const mConstraint = MouseConstraint.create(engine, {
+  mouse: Mouse.create(cakeCanvas),
+  constraint: { stiffness: 0.08, damping: 0.12, render: { visible: false } }
+});
+World.add(world, mConstraint);
+
+// ─── 小球 ────────────────────────────────────────
+const PAL = [
+  ['#ff9ec4','#ffb3cc','#ff7ab0','#ffd6e8','#e8649a'],
+  ['#c49eff','#b380ff','#d4b3ff','#9966ff','#e0ccff'],
+  ['#9ec8ff','#80b3ff','#b3d4ff','#6699ff','#cce0ff'],
+  ['#ffdd9e','#ffd080','#ffe4b3','#ffcc66','#fff0cc'],
+];
+let ballCount = 0;
+const MAX_BALLS = 480;
+
+function spawnBall(x, y, li) {
+  if (ballCount >= MAX_BALLS) return;
+  const r = 5 + Math.random() * 8;
+  const pal = PAL[Math.min(li, PAL.length - 1)];
+  const col = pal[Math.floor(Math.random() * pal.length)];
+  const b = Bodies.circle(x, y, r, {
+    restitution: 0.35, friction: 0.15, frictionAir: 0.008, density: 0.002,
+    _col: col, _r: r, _glow: Math.random() > 0.72
+  });
+  World.add(world, b);
+  ballCount++;
+}
+
+function fillCake() {
+  const cx = CX(), layers = LAYERS(), cr = CREAM_R(), ccy = CREAM_CY();
+  const drops = [];
+  layers.forEach((l, li) => {
+    const n = [150, 100, 65][li];
+    for (let i = 0; i < n; i++) {
+      drops.push({ x: cx + (Math.random() - 0.5) * l.hw * 1.7, y: l.y - l.h / 2 - 20 - Math.random() * 180, li, d: i * 10 });
+    }
+  });
+  for (let i = 0; i < 50; i++) {
+    const ang = Math.random() * Math.PI * 2, dist = Math.random() * (cr - 12);
+    const x = cx + dist * Math.cos(ang), y = ccy + dist * Math.sin(ang);
+    if (y < ccy) drops.push({ x, y: y - Math.random() * 70, li: 3, d: i * 18 + 600 });
+  }
+  drops.forEach(d => setTimeout(() => spawnBall(d.x, d.y, d.li), d.delay || d.d));
+}
+setTimeout(fillCake, 300);
+
+// 鼠标点击投球
+let mousePos = { x: -999, y: -999 };
+cakeCanvas.addEventListener('mousemove', e => { mousePos = { x: e.clientX, y: e.clientY }; });
+cakeCanvas.addEventListener('mouseleave', () => { mousePos = { x: -999, y: -999 }; });
+Events.on(mConstraint, 'mousedown', e => {
+  const { x, y } = e.mouse.position;
+  const hit = Composite.allBodies(world).find(b => !b.isStatic && b.circleRadius &&
+    Math.hypot(b.position.x - x, b.position.y - y) < b.circleRadius + 2);
+  if (!hit) for (let i = 0; i < 5; i++) spawnBall(x + (Math.random() - 0.5) * 28, y + (Math.random() - 0.5) * 28, 0);
+});
+
+// ─── 蜡烛 ────────────────────────────────────────
+const CANDLE_OFFSETS = [-52, 0, 52];
+const sparks = [];
+function addSpark(x, y) {
+  sparks.push({ x, y, vx: (Math.random() - 0.5) * 1.4, vy: -1 - Math.random() * 2, life: 1, col: Math.random() > 0.5 ? '#ffe080' : '#ffb040', r: 1.2 + Math.random() * 1.6 });
+}
+
+// ═══════════════════════════════════════════
+//  TEXT PARTICLE SYSTEM
+// ═══════════════════════════════════════════
+const TEXT = '彦军生日快乐';
+const TEXT_PAL = ['#ff6ec7','#6ec7ff','#ffe46e','#6effc4','#ff9d6e','#c26eff','#6effdd'];
+let textPts = [];
+
+function buildTextPts() {
+  const oc = document.createElement('canvas');
+  oc.width = 980; oc.height = 130;
+  const ox = oc.getContext('2d');
+  ox.fillStyle = '#fff'; ox.font = 'bold 100px serif';
+  ox.textBaseline = 'middle'; ox.textAlign = 'center';
+  ox.fillText(TEXT, 490, 65);
+  const d = ox.getImageData(0, 0, 980, 130).data;
+  const pts = [];
+  for (let y = 0; y < 130; y += 3)
+    for (let x = 0; x < 980; x += 3)
+      if (d[(y * 980 + x) * 4 + 3] > 110)
+        pts.push({ x: (x - 490) * 0.84, y: (y - 65) * 0.84, z: (Math.random() - 0.5) * 20,
+          col: TEXT_PAL[Math.floor(Math.random() * TEXT_PAL.length)], delay: Math.random() });
+  return pts;
+}
+textPts = buildTextPts();
+
+// 文字悬浮位置：蛋糕正上方
+const TEXT_Y = () => CREAM_CY() - CREAM_R() - 70;
+
+let textRotY = 0;
+function projectText(px, py, pz) {
+  const rotX = 0.08;
+  const cx = Math.cos(rotX), sx = Math.sin(rotX);
+  const cy = Math.cos(textRotY), sy = Math.sin(textRotY);
+  const y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
+  const x2 = px * cy + z2 * sy, z3 = -px * sy + z2 * cy;
+  const fov = 520, sc = fov / (fov + z3 + 200);
+  return { sx: x2 * sc + W / 2, sy: y2 * sc + TEXT_Y(), sc, z: z3 };
+}
+
+// ─── 状态机 ──────────────────────────────────────
+// 'idle' | 'reveal' | 'hold' | 'dismiss'
+let state = 'idle', revealP = 0, dismissP = 0;
+
+// 爆炸粒子
+const EXPL = Array.from({ length: 550 }, () => ({ active: false }));
+function fireExplosion() {
+  const used = Math.min(textPts.length, EXPL.length);
+  for (let i = 0; i < used; i++) {
+    const p = EXPL[i];
+    const tp = textPts[Math.floor(Math.random() * textPts.length)];
+    Object.assign(p, {
+      x: tp.x, y: tp.y, z: tp.z,
+      vx: (Math.random() - 0.5) * 9, vy: (Math.random() - 0.5) * 9 - 3, vz: (Math.random() - 0.5) * 6,
+      life: 1, decay: 0.009 + Math.random() * 0.008,
+      col: tp.col, size: 2 + Math.random() * 3, active: true
+    });
+  }
+}
+
+// 彩带
+const RIBS = Array.from({ length: 75 }, () => ({
+  w: 6 + Math.random() * 10, h: 12 + Math.random() * 12,
+  col: TEXT_PAL[Math.floor(Math.random() * TEXT_PAL.length)], active: false
+}));
+let ribTimer = 0;
+function launchRibbons() {
+  ribTimer = 360;
+  RIBS.forEach(r => {
+    r.x = Math.random() * W; r.y = -10 - Math.random() * 120;
+    r.vy = 1.5 + Math.random() * 2.5; r.vx = (Math.random() - 0.5) * 1.8;
+    r.rot = Math.random() * Math.PI * 2; r.vrot = (Math.random() - 0.5) * 0.09; r.active = true;
+  });
+}
+
+// 手指光线（从指尖射向文字）
+function drawFingerRays(lm, textVisible) {
+  if (!textVisible) return;
+  const fingertips = [4, 8, 12, 16, 20];
+  const tx = W / 2, ty = TEXT_Y();
+  fingertips.forEach((fi, i) => {
+    const fx = (1 - lm[fi].x) * W, fy = lm[fi].y * H;
+    const alpha = (revealP > 0 ? revealP : 1 - dismissP) * 0.18;
+    const g = hCtx.createLinearGradient(fx, fy, tx, ty);
+    g.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    hCtx.strokeStyle = g;
+    hCtx.lineWidth = 1;
+    hCtx.setLineDash([4, 8]);
+    hCtx.beginPath(); hCtx.moveTo(fx, fy); hCtx.lineTo(tx, ty); hCtx.stroke();
+    hCtx.setLineDash([]);
+  });
+}
+
+// ═══════════════════════════════════════════
+//  MAIN RENDER LOOP
+// ═══════════════════════════════════════════
+let frame = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  Engine.update(engine, 1000 / 60);
+  frame++;
+  textRotY += 0.006;
+
+  const cx = CX(), fl = FLOOR(), layers = LAYERS(), cr = CREAM_R(), ccy = CREAM_CY();
+
+  // ─ cake canvas ─────────────────────────────────
+  cCtx.clearRect(0, 0, W, H);
+
+  // 深色背景
+  const bg = cCtx.createRadialGradient(cx, H * 0.55, 0, cx, H * 0.55, H * 0.85);
+  bg.addColorStop(0, '#1a0d2e'); bg.addColorStop(1, '#060610');
+  cCtx.fillStyle = bg; cCtx.fillRect(0, 0, W, H);
+
+  // 星点
+  for (let i = 0; i < 70; i++) {
+    const sx = (i * 137.5 + frame * 0.015) % W;
+    const sy = (i * 97.3) % H;
+    const sa = 0.4 + Math.sin(frame * 0.025 + i) * 0.25;
+    cCtx.globalAlpha = Math.max(0, sa * 0.6);
+    cCtx.fillStyle = '#fff';
+    cCtx.beginPath(); cCtx.arc(sx, sy, 0.5 + (i % 3) * 0.3, 0, Math.PI * 2); cCtx.fill();
+  }
+  cCtx.globalAlpha = 1;
+
+  // 蛋糕层背景
+  layers.forEach(l => {
+    const x = cx - l.hw, y = l.y - l.h / 2, w = l.hw * 2, h = l.h;
+    cCtx.globalAlpha = 0.10;
+    cCtx.fillStyle = l.color;
+    rr(cCtx, x, y, w, h, 6); cCtx.fill();
+    cCtx.globalAlpha = 0.14; cCtx.strokeStyle = l.color; cCtx.lineWidth = 1; cCtx.stroke();
+    // 横纹
+    cCtx.globalAlpha = 0.055; cCtx.strokeStyle = l.color; cCtx.lineWidth = 1;
+    for (let s = 1; s < 4; s++) {
+      cCtx.beginPath(); cCtx.moveTo(x + 6, y + h / 4 * s); cCtx.lineTo(x + w - 6, y + h / 4 * s); cCtx.stroke();
+    }
+    cCtx.globalAlpha = 1;
+  });
+
+  // 奶油顶背景
+  cCtx.globalAlpha = 0.09; cCtx.fillStyle = '#ffe4b3';
+  cCtx.beginPath(); cCtx.arc(cx, ccy, cr, Math.PI, 0); cCtx.closePath(); cCtx.fill();
+  cCtx.globalAlpha = 1;
+
+  // 小球
+  const balls = Composite.allBodies(world).filter(b => !b.isStatic && b.circleRadius);
+  balls.sort((a, b) => a.position.y - b.position.y);
+  balls.forEach(b => {
+    const { x, y } = b.position, r = b.circleRadius, col = b._col || '#fff';
+    if (b._glow) {
+      cCtx.globalAlpha = 0.15; cCtx.fillStyle = col;
+      cCtx.beginPath(); cCtx.arc(x, y, r * 1.85, 0, Math.PI * 2); cCtx.fill(); cCtx.globalAlpha = 1;
+    }
+    const g = cCtx.createRadialGradient(x - r * 0.3, y - r * 0.32, r * 0.05, x, y, r);
+    g.addColorStop(0, lighten(col, 55)); g.addColorStop(0.5, col); g.addColorStop(1, darken(col, 38));
+    cCtx.fillStyle = g; cCtx.beginPath(); cCtx.arc(x, y, r, 0, Math.PI * 2); cCtx.fill();
+    cCtx.globalAlpha = 0.5; cCtx.fillStyle = 'rgba(255,255,255,0.85)';
+    cCtx.beginPath(); cCtx.ellipse(x - r * 0.28, y - r * 0.3, r * 0.27, r * 0.17, -0.5, 0, Math.PI * 2); cCtx.fill();
+    cCtx.globalAlpha = 1;
+  });
+
+  // 蜡烛
+  CANDLE_OFFSETS.forEach((off, ci) => {
+    const candleX = cx + off, candleY = ccy - cr + 8;
+    cCtx.fillStyle = '#fff9ee';
+    rr(cCtx, candleX - 4.5, candleY, 9, 26, 3); cCtx.fill();
+    cCtx.strokeStyle = 'rgba(255,210,130,0.3)'; cCtx.lineWidth = 0.5; cCtx.stroke();
+    const t2 = frame * 0.07 + ci * 2.1;
+    const flk = Math.sin(t2 * 3.1) * 1.8 + Math.sin(t2 * 7.3) * 0.9;
+    const fw = 4.5 + Math.sin(t2 * 2.5) * 1.3, fh = 13 + Math.sin(t2 * 2.1) * 2.5;
+    const fg = cCtx.createRadialGradient(candleX + flk * 0.3, candleY - fh * 0.4, 0, candleX, candleY, fh);
+    fg.addColorStop(0, 'rgba(255,255,180,0.95)'); fg.addColorStop(0.4, 'rgba(255,160,30,0.8)'); fg.addColorStop(1, 'rgba(255,60,0,0)');
+    cCtx.fillStyle = fg;
+    cCtx.beginPath(); cCtx.ellipse(candleX + flk * 0.4, candleY - fh * 0.45, fw, fh, flk * 0.08, 0, Math.PI * 2); cCtx.fill();
+    cCtx.fillStyle = 'rgba(255,255,220,0.88)';
+    cCtx.beginPath(); cCtx.ellipse(candleX + flk * 0.2, candleY - fh * 0.3, fw * 0.32, fh * 0.32, 0, 0, Math.PI * 2); cCtx.fill();
+    if (frame % 4 === ci) addSpark(candleX + flk * 0.5, candleY - fh);
+  });
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i];
+    s.x += s.vx; s.y += s.vy; s.vy -= 0.04; s.life -= 0.028;
+    if (s.life <= 0) { sparks.splice(i, 1); continue; }
+    cCtx.globalAlpha = s.life * 0.7; cCtx.fillStyle = s.col;
+    cCtx.beginPath(); cCtx.arc(s.x, s.y, s.r * s.life, 0, Math.PI * 2); cCtx.fill();
+  }
+  cCtx.globalAlpha = 1;
+
+  // 鼠标斥力
+  if (mousePos.x > 0) {
+    balls.forEach(b => {
+      const dx = b.position.x - mousePos.x, dy = b.position.y - mousePos.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 90 && d > 0.1) {
+        const f = (90 - d) / 90 * 0.0014;
+        Body.applyForce(b, b.position, { x: dx / d * f, y: dy / d * f });
+      }
+    });
+    cCtx.globalAlpha = 0.10;
+    const mg = cCtx.createRadialGradient(mousePos.x, mousePos.y, 0, mousePos.x, mousePos.y, 90);
+    mg.addColorStop(0, '#fff'); mg.addColorStop(1, 'transparent');
+    cCtx.fillStyle = mg; cCtx.beginPath(); cCtx.arc(mousePos.x, mousePos.y, 90, 0, Math.PI * 2); cCtx.fill();
+    cCtx.globalAlpha = 1;
+  }
+
+  // ─ text canvas ─────────────────────────────────
+  tCtx.clearRect(0, 0, W, H);
+  const textVisible = state !== 'idle';
+
+  if (state === 'reveal') {
+    revealP = Math.min(1, revealP + 0.020);
+    drawTextCloud(revealP, 1);
+    if (revealP >= 1) { state = 'hold'; fireExplosion(); launchRibbons(); }
+  }
+  if (state === 'hold') {
+    drawTextCloud(1, 1); drawExplosion(); drawRibbons();
+  }
+  if (state === 'dismiss') {
+    dismissP = Math.min(1, dismissP + 0.026);
+    drawTextCloud(1, 1 - dismissP);
+    if (dismissP >= 1) {
+      state = 'idle'; revealP = 0; dismissP = 0;
+      EXPL.forEach(p => p.active = false);
+    }
+  }
+
+  // ─ hand canvas ─────────────────────────────────
+  // (hand is drawn in MediaPipe callback)
+  // Finger rays drawn separately when landmark available
+}
+loop();
+
+function drawTextCloud(reveal, master) {
+  const sorted = textPts.map((p, i) => {
+    const pr = projectText(p.x, p.y, p.z);
+    return { ...p, ...pr };
+  }).sort((a, b) => a.z - b.z);
+  sorted.forEach(p => {
+    const local = Math.max(0, Math.min(1, (reveal - p.delay * 0.65) / 0.35));
+    const a = local * master * Math.max(0.28, 0.5 + p.sc * 0.5);
+    if (a < 0.01) return;
+    tCtx.globalAlpha = a; tCtx.fillStyle = p.col;
+    const s = Math.max(0.8, 3.0 * p.sc) * (0.5 + local * 0.5);
+    tCtx.save(); tCtx.translate(p.sx, p.sy); tCtx.fillRect(-s/2, -s/2, s, s); tCtx.restore();
+  });
+  tCtx.globalAlpha = 1;
+}
+
+function drawExplosion() {
+  EXPL.forEach(p => {
+    if (!p.active) return;
+    p.x += p.vx; p.y += p.vy; p.z += p.vz;
+    p.vy += 0.08; p.vx *= 0.98; p.vz *= 0.98;
+    p.life -= p.decay;
+    if (p.life <= 0) { p.active = false; return; }
+    const pr = projectText(p.x, p.y, p.z);
+    tCtx.globalAlpha = p.life * 0.85; tCtx.fillStyle = p.col;
+    tCtx.beginPath(); tCtx.arc(pr.sx, pr.sy, Math.max(0.5, p.size * pr.sc), 0, Math.PI * 2); tCtx.fill();
+  });
+  tCtx.globalAlpha = 1;
+}
+
+function drawRibbons() {
+  if (ribTimer <= 0) return; ribTimer--;
+  RIBS.forEach(r => {
+    if (!r.active) return;
+    r.x += r.vx; r.y += r.vy; r.rot += r.vrot;
+    if (r.y > H + 20) r.active = false;
+    tCtx.save(); tCtx.translate(r.x, r.y); tCtx.rotate(r.rot);
+    tCtx.fillStyle = r.col; tCtx.globalAlpha = 0.78;
+    tCtx.fillRect(-r.w/2, -r.h/2, r.w, r.h); tCtx.restore();
+  });
+  tCtx.globalAlpha = 1;
+}
+
+// ═══════════════════════════════════════════
+//  HAND GESTURE
+// ═══════════════════════════════════════════
+const CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+let openFrames = 0;
+const OPEN_THRESH = 10;
+let lastLm = null;
+
+function checkOpen(lm) {
+  const tips = [8,12,16,20], pips = [6,10,14,18];
+  let ext = 0;
+  for (let i = 0; i < 4; i++) if (lm[tips[i]].y < lm[pips[i]].y) ext++;
+  return ext >= 3 && Math.abs(lm[4].x - lm[2].x) > 0.068;
+}
+
+function drawHand(lm, open) {
+  hCtx.clearRect(0, 0, W, H);
+  // 手部骨架
+  hCtx.strokeStyle = open ? 'rgba(110,255,196,0.5)' : 'rgba(255,110,199,0.32)';
+  hCtx.lineWidth = 1.5;
+  CONN.forEach(([a,b]) => {
+    hCtx.beginPath();
+    hCtx.moveTo((1-lm[a].x)*W, lm[a].y*H);
+    hCtx.lineTo((1-lm[b].x)*W, lm[b].y*H);
+    hCtx.stroke();
+  });
+  lm.forEach(l => {
+    hCtx.beginPath(); hCtx.arc((1-l.x)*W, l.y*H, 3, 0, Math.PI*2);
+    hCtx.fillStyle = open ? 'rgba(110,255,196,0.85)' : 'rgba(255,110,199,0.65)'; hCtx.fill();
+  });
+
+  // 手指指向文字的光线（张开时才画）
+  if (open && state !== 'idle') {
+    const tips = [4,8,12,16,20];
+    const tx = W/2, ty = TEXT_Y();
+    const alpha = Math.min(revealP > 0 ? revealP : (1 - dismissP), 0.22);
+    tips.forEach(fi => {
+      const fx = (1-lm[fi].x)*W, fy = lm[fi].y*H;
+      const grad = hCtx.createLinearGradient(fx, fy, tx, ty);
+      grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      hCtx.strokeStyle = grad; hCtx.lineWidth = 0.8;
+      hCtx.setLineDash([3,9]);
+      hCtx.beginPath(); hCtx.moveTo(fx, fy); hCtx.lineTo(tx, ty); hCtx.stroke();
+      hCtx.setLineDash([]);
+    });
+  }
+}
+
+async function initHands() {
+  try {
+    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({ maxNumHands:1, modelComplexity:0, minDetectionConfidence:0.72, minTrackingConfidence:0.65 });
+
+    hands.onResults(results => {
+      if (loadingEl.style.display !== 'none') {
+        loadingEl.style.display = 'none';
+        hint.textContent = '✋ 张开手掌 · 送上祝福';
+      }
+      const lms = results.multiHandLandmarks;
+      if (lms && lms.length > 0) {
+        const lm = lms[0]; lastLm = lm;
+        const open = checkOpen(lm);
+        drawHand(lm, open);
+        if (open) {
+          openFrames = Math.min(openFrames + 1, OPEN_THRESH + 2);
+          if (openFrames === OPEN_THRESH && (state === 'idle' || state === 'dismiss')) {
+            state = 'reveal'; revealP = 0; dismissP = 0;
+            EXPL.forEach(p => p.active = false);
+            hint.textContent = '';
+          }
+        } else {
+          if (openFrames >= OPEN_THRESH && state === 'hold') {
+            state = 'dismiss'; dismissP = 0; EXPL.forEach(p => p.active = false);
+          }
+          openFrames = 0;
+          if (state === 'idle') hint.textContent = '✋ 张开手掌 · 送上祝福';
+        }
+      } else {
+        hCtx.clearRect(0, 0, W, H); lastLm = null;
+        if (openFrames >= OPEN_THRESH && state === 'hold') {
+          state = 'dismiss'; dismissP = 0; EXPL.forEach(p => p.active = false);
+        }
+        openFrames = 0;
+        if (state === 'idle') hint.textContent = '✋ 请将手放入画面';
+      }
+    });
+
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode:'user', width:640, height:480 } });
+    video.srcObject = stream;
+    new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width:640, height:480 }).start();
+
+  } catch(e) {
+    loadingEl.style.display = 'none';
+    hint.textContent = '无摄像头 · 点击屏幕演示';
+    cakeCanvas.style.cursor = 'pointer';
+    cakeCanvas.addEventListener('click', e => {
+      if (state === 'idle') { state = 'reveal'; revealP = 0; hint.textContent = ''; }
+      else if (state === 'hold') { state = 'dismiss'; dismissP = 0; EXPL.forEach(p => p.active = false); }
+    });
+  }
+}
+initHands();
+
+// ═══════════════════════════════════════════
+//  UTILS
+// ═══════════════════════════════════════════
+function rr(c, x, y, w, h, r) {
+  c.beginPath(); c.moveTo(x+r,y); c.lineTo(x+w-r,y); c.arcTo(x+w,y,x+w,y+r,r);
+  c.lineTo(x+w,y+h-r); c.arcTo(x+w,y+h,x+w-r,y+h,r); c.lineTo(x+r,y+h);
+  c.arcTo(x,y+h,x,y+h-r,r); c.lineTo(x,y+r); c.arcTo(x,y,x+r,y,r); c.closePath();
+}
+function lighten(hex, a) {
+  const n=parseInt(hex.slice(1),16);
+  return `rgb(${Math.min(255,(n>>16)+a)},${Math.min(255,((n>>8)&0xff)+a)},${Math.min(255,(n&0xff)+a)})`;
+}
+function darken(hex, a) {
+  const n=parseInt(hex.slice(1),16);
+  return `rgb(${Math.max(0,(n>>16)-a)},${Math.max(0,((n>>8)&0xff)-a)},${Math.max(0,(n&0xff)-a)})`;
+}
+</script>
+</body>
+</html>
